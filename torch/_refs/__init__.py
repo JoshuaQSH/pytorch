@@ -2509,9 +2509,27 @@ def atleast_3d(
 
 
 def as_strided(
-    a: TensorLikeType, size: ShapeType, stride: StrideType, storage_offset: int = 0
+    a: TensorLikeType,
+    size: ShapeType,
+    stride: StrideType,
+    storage_offset: Optional[int] = None,
 ) -> TensorLikeType:
-    return prims.as_strided(a, size, stride, storage_offset)
+    storage_offset_int = (
+        storage_offset if storage_offset is not None else a.storage_offset()
+    )
+    return prims.as_strided(a, size, stride, storage_offset_int)
+
+
+@register_decomposition(torch.ops.aten.as_strided_scatter)
+def as_strided_scatter(
+    input: TensorLikeType,
+    src: TensorLikeType,
+    size: ShapeType,
+    stride: StrideType,
+    storage_offset: Optional[int] = None,
+) -> TensorLikeType:
+    storage_offset_int = 0 if storage_offset is None else storage_offset
+    return prims.as_strided_scatter(input, src, size, stride, storage_offset_int)
 
 
 def broadcast_shapes(*shapes) -> ShapeType:
