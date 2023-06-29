@@ -6,9 +6,10 @@ constructor arguments.
 from dataclasses import dataclass
 from enum import auto, Enum
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
+from torch.nn.modules.batchnorm import _BatchNorm
 
 __all__ = [
     "ShardingStrategy",
@@ -20,6 +21,11 @@ __all__ = [
     "FullStateDictConfig",
     "LocalStateDictConfig",
     "ShardedStateDictConfig",
+    "OptimStateDictConfig",
+    "FullOptimStateDictConfig",
+    "LocalOptimStateDictConfig",
+    "ShardedOptimStateDictConfig",
+    "StateDictSettings",
 ]
 
 
@@ -47,13 +53,13 @@ class ShardingStrategy(Enum):
       synchronizes them (via all-reduce) after the backward computation. The
       unsharded optimizer states are updated locally per rank.
     - ``HYBRID_SHARD``: Apply ``FULL_SHARD`` within a node, and replicate parameters across
-        nodes. This results in reduced communication volume as expensive all-gathers and
-        reduce-scatters are only done within a node, which can be more performant for medium
-        -sized models.
+      nodes. This results in reduced communication volume as expensive all-gathers and
+      reduce-scatters are only done within a node, which can be more performant for medium
+      -sized models.
     - ``_HYBRID_SHARD_ZERO2``: Apply ``SHARD_GRAD_OP`` within a node, and replicate parameters across
-        nodes. This is like ``HYBRID_SHARD``, except this may provide even higher throughput
-        since the unsharded parameters are not freed after the forward pass, saving the
-        all-gathers in the pre-backward.
+      nodes. This is like ``HYBRID_SHARD``, except this may provide even higher throughput
+      since the unsharded parameters are not freed after the forward pass, saving the
+      all-gathers in the pre-backward.
     """
 
     FULL_SHARD = auto()
@@ -68,10 +74,11 @@ class BackwardPrefetch(Enum):
     This configures explicit backward prefetching, which can improve throughput
     but may slightly increase peak memory usage.
 
-    For NCCL backend, any collectives, even if issued in different streams,
-    contend for the same per-device NCCL stream, which is why the relative
-    order in which the collectives are issued matters for overlapping. The
-    different backward prefetching settings correspond to different orderings.
+    For a single process group using NCCL backend, any collectives, even if
+    issued in different streams, contend for the same per-device NCCL stream,
+    which is why the relative order in which the collectives are issued matters
+    for overlapping. The different backward prefetching settings correspond to
+    different orderings.
 
     - ``BACKWARD_PRE``: This prefetches the next set of parameters before the
       current set of parameter's gradient computation. This improves backward
@@ -103,7 +110,9 @@ class MixedPrecision:
 
     Attributes:
         param_dtype (torch.dtype): This specifies the dtype for model
-            parameters, inputs, and therefore the dtype for computation.
+            parameters, inputs (when ``cast_forward_inputs`` or
+            ``cast_root_forward_inputs``is set to
+            ``True``), and therefore the dtype for computation.
             However, outside the forward and backward passes, parameters are in
             full precision. Model checkpointing always happens in full
             precision.
@@ -117,6 +126,20 @@ class MixedPrecision:
             gradients back to the full parameter precision after the backward
             pass. This may be set to ``False`` to save memory if using custom
             optimizers that can perform the optimizer step in ``reduce_dtype``.
+            (Default: ``False``)
+        cast_forward_inputs (bool): Cast floating point tensors in the forward
+            arguments and keyword arguments to ``param_dtype``.
+            (Default: ``False``)
+        cast_root_forward_inputs (bool): Cast floating point tensors in the forward
+            arguments and keyword arguments to ``param_dtype`` for the root FSDP instance.
+            It takes precedence over ``cast_forward_inputs`` for the root FSDP instance.
+            (Default: ``True``)
+        _module_classes_to_ignore: (Sequence[type]): Module classes to ignore
+            for mixed precision. This will make the specified ``nn.Module`` types ignore mixed precision,
+            by wrapping them in their own FSDP unit and setting ``mixed_precision=None``. Note that
+            this setting is only relevant for auto wrapping with ``auto_wrap_policy``, and that this
+            implies the ultimate wrapping of your FSDP module will be different than what the policy
+            specifies. Note that this API is experimental and subject to change.
 
     .. note:: This API is experimental and subject to change.
 
@@ -146,12 +169,52 @@ class MixedPrecision:
         not use an ``auto_wrap_policy``, then the user must take care to not
         use mixed precision for FSDP instances containing ``BatchNorm``
         modules.
+
+    .. note:: ``MixedPrecision`` has ``cast_root_forward_inputs=True`` and
+        ``cast_forward_inputs=False`` by default. For the root FSDP instance,
+        its ``cast_root_forward_inputs`` takes precedence over its
+        ``cast_forward_inputs``. For non-root FSDP instances, their
+        ``cast_root_forward_inputs`` values are ignored. The default setting is
+        sufficient for the typical case where each FSDP instance has the same
+        ``MixedPrecision`` configuration and only needs to cast inputs to the
+        ``param_dtype`` at the beginning of the model's forward pass.
+
+    .. note:: For nested FSDP instances with different ``MixedPrecision``
+        configurations, we recommend setting individual ``cast_forward_inputs``
+        values to configure casting inputs or not before each instance's
+        forward. In such a case, since the casts happen before each FSDP
+        instance's forward, a parent FSDP instance should have its non-FSDP
+        submodules run before its FSDP submodules to avoid the activation dtype
+        being changed due to a different ``MixedPrecision`` configuration.
+
+        Example::
+
+            >>> # xdoctest: +SKIP("undefined variables")
+            >>> model = nn.Sequential(nn.Linear(3, 3), nn.Linear(3, 3))
+            >>> model[1] = FSDP(
+            >>>     model[1],
+            >>>     mixed_precision=MixedPrecision(param_dtype=torch.float16, cast_forward_inputs=True),
+            >>> )
+            >>> model = FSDP(
+            >>>     model,
+            >>>     mixed_precision=MixedPrecision(param_dtype=torch.bfloat16, cast_forward_inputs=True),
+            >>> )
+
+        The above shows a working example. On the other hand, if ``model[1]``
+        were replaced with ``model[0]``, meaning that the submodule using
+        different ``MixedPrecision`` ran its forward first, then ``model[1]``
+        would incorrectly see ``float16`` activations instead of ``bfloat16``
+        ones.
+
     """
 
     param_dtype: Optional[torch.dtype] = None
     reduce_dtype: Optional[torch.dtype] = None
     buffer_dtype: Optional[torch.dtype] = None
     keep_low_precision_grads: bool = False
+    cast_forward_inputs: bool = False
+    cast_root_forward_inputs: bool = True
+    _module_classes_to_ignore: Optional[Sequence[type]] = (_BatchNorm,)
 
 
 @dataclass
@@ -210,6 +273,7 @@ class StateDictConfig:
     """
 
     offload_to_cpu: bool = False
+    use_dtensor: bool = False
 
 
 @dataclass
@@ -252,3 +316,39 @@ class LocalStateDictConfig(StateDictConfig):
 @dataclass
 class ShardedStateDictConfig(StateDictConfig):
     pass
+
+
+@dataclass
+class OptimStateDictConfig:
+    """
+    ``OptimStateDictConfig`` is the base class for all optimizer state_dict
+    configuration classes.  Users should instantiate a child version
+    (i.e. ``FullOptimStateDictConfig``) in order to configure settings for the
+    particular type of ``optim_state_dict`` implementation FSDP will use.
+    """
+
+    # TODO: actually use this flag in the _optim_utils.py
+    offload_to_cpu: bool = True
+    use_dtensor: bool = False
+
+
+@dataclass
+class FullOptimStateDictConfig(OptimStateDictConfig):
+    rank0_only: bool = False
+
+
+@dataclass
+class LocalOptimStateDictConfig(OptimStateDictConfig):
+    offload_to_cpu: bool = False
+
+
+@dataclass
+class ShardedOptimStateDictConfig(OptimStateDictConfig):
+    pass
+
+
+@dataclass
+class StateDictSettings:
+    state_dict_type: StateDictType
+    state_dict_config: StateDictConfig
+    optim_state_dict_config: OptimStateDictConfig

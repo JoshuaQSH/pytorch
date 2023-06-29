@@ -15,7 +15,7 @@ namespace c10d {
 
 // Base class for supplementary data potentially needed by ReduceOps
 struct TORCH_API _SupplementBase : torch::CustomClassHolder {
-  virtual ~_SupplementBase() {}
+  ~_SupplementBase() override = default;
 };
 
 // Supplementary data specific to NCCL PREMUL_SUM
@@ -46,7 +46,7 @@ struct TORCH_API ReduceOp : torch::CustomClassHolder {
     UNUSED = 9
   };
 
-  ReduceOp() {}
+  ReduceOp() = default;
 
   ReduceOp(RedOpType op) : op_(op) {
     TORCH_INTERNAL_ASSERT(
@@ -119,6 +119,7 @@ struct BroadcastOptions {
 struct AllreduceOptions {
   ReduceOp reduceOp = ReduceOp::SUM;
   std::chrono::milliseconds timeout = kUnsetTimeout;
+  c10::optional<at::Tensor> sparseIndices = c10::nullopt;
 };
 
 struct AllreduceCoalescedOptions : AllreduceOptions {};
@@ -156,6 +157,7 @@ struct AllToAllOptions {
 struct BarrierOptions {
   std::vector<int64_t> device_ids;
   std::chrono::milliseconds timeout = kUnsetTimeout;
+  c10::optional<at::Device> device;
 };
 
 struct DistributedBackendOptions {

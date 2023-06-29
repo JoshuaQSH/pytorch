@@ -3,20 +3,17 @@
 from .common import AOMigrationTestCase
 
 class TestAOMigrationQuantizationFx(AOMigrationTestCase):
-    def test_package_import_quantize_fx(self):
-        self._test_package_import('quantize_fx')
-
     def test_function_import_quantize_fx(self):
         function_list = [
             '_check_is_graph_module',
             '_swap_ff_with_fxff',
             '_fuse_fx',
-            'Scope',
-            'ScopeContextManager',
             'QuantizationTracer',
             '_prepare_fx',
             '_prepare_standalone_module_fx',
             'fuse_fx',
+            'Scope',
+            'ScopeContextManager',
             'prepare_fx',
             'prepare_qat_fx',
             '_convert_fx',
@@ -24,12 +21,6 @@ class TestAOMigrationQuantizationFx(AOMigrationTestCase):
             '_convert_standalone_module_fx',
         ]
         self._test_function_import('quantize_fx', function_list)
-
-    def test_package_import_fx(self):
-        self._test_package_import('fx', skip=[
-            'fusion_patterns',
-            'quantization_patterns',
-        ])
 
     def test_function_import_fx(self):
         function_list = [
@@ -39,36 +30,27 @@ class TestAOMigrationQuantizationFx(AOMigrationTestCase):
         ]
         self._test_function_import('fx', function_list)
 
-    def test_package_import_fx_graph_module(self):
-        self._test_package_import('fx.graph_module')
-
     def test_function_import_fx_graph_module(self):
         function_list = [
             'FusedGraphModule',
             'ObservedGraphModule',
-            'is_observed_module',
+            '_is_observed_module',
             'ObservedStandaloneGraphModule',
-            'is_observed_standalone_module',
+            '_is_observed_standalone_module',
             'QuantizedGraphModule'
         ]
         self._test_function_import('fx.graph_module', function_list)
 
-    def test_package_import_fx_pattern_utils(self):
-        self._test_package_import('fx.pattern_utils')
-
     def test_function_import_fx_pattern_utils(self):
         function_list = [
             'QuantizeHandler',
-            'register_fusion_pattern',
+            '_register_fusion_pattern',
             'get_default_fusion_patterns',
-            'register_quant_pattern',
+            '_register_quant_pattern',
             'get_default_quant_patterns',
             'get_default_output_activation_post_process_map'
         ]
         self._test_function_import('fx.pattern_utils', function_list)
-
-    def test_package_import_fx_equalize(self):
-        self._test_package_import('fx._equalize')
 
     def test_function_import_fx_equalize(self):
         function_list = [
@@ -101,12 +83,6 @@ class TestAOMigrationQuantizationFx(AOMigrationTestCase):
         ]
         self._test_function_import('fx._equalize', function_list)
 
-    def test_package_import_fx_quantization_patterns(self):
-        self._test_package_import(
-            'fx.quantization_patterns',
-            new_package_name='fx.quantize_handler',
-        )
-
     def test_function_import_fx_quantization_patterns(self):
         function_list = [
             'QuantizeHandler',
@@ -130,20 +106,14 @@ class TestAOMigrationQuantizationFx(AOMigrationTestCase):
             new_package_name='fx.quantize_handler',
         )
 
-    def test_package_import_fx_match_utils(self):
-        self._test_package_import('fx.match_utils')
-
     def test_function_import_fx_match_utils(self):
         function_list = [
-            'MatchResult',
+            '_MatchResult',
             'MatchAllNode',
-            'is_match',
-            'find_matches'
+            '_is_match',
+            '_find_matches'
         ]
         self._test_function_import('fx.match_utils', function_list)
-
-    def test_package_import_fx_prepare(self):
-        self._test_package_import('fx.prepare')
 
     def test_function_import_fx_prepare(self):
         function_list = [
@@ -151,27 +121,15 @@ class TestAOMigrationQuantizationFx(AOMigrationTestCase):
         ]
         self._test_function_import('fx.prepare', function_list)
 
-    def test_package_import_fx_convert(self):
-        self._test_package_import('fx.convert')
-
     def test_function_import_fx_convert(self):
         function_list = [
             'convert'
         ]
         self._test_function_import('fx.convert', function_list)
 
-    def test_package_import_fx_fuse(self):
-        self._test_package_import('fx.fuse')
-
     def test_function_import_fx_fuse(self):
         function_list = ['fuse']
         self._test_function_import('fx.fuse', function_list)
-
-    def test_package_import_fx_fusion_patterns(self):
-        self._test_package_import(
-            'fx.fusion_patterns',
-            new_package_name='fx.fuse_handler',
-        )
 
     def test_function_import_fx_fusion_patterns(self):
         function_list = [
@@ -188,9 +146,6 @@ class TestAOMigrationQuantizationFx(AOMigrationTestCase):
     # old: torch.quantization.fx.quantization_types
     # new: torch.ao.quantization.utils
     # both are valid, but we'll deprecate the old path in the future
-
-    def test_package_import_fx_utils(self):
-        self._test_package_import('fx.utils')
 
     def test_function_import_fx_utils(self):
         function_list = [

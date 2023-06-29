@@ -198,7 +198,7 @@ bool IsValidONNXControlflowNode(const Node* n) {
   // nodes later, when the subgraph has already completed shape inferencing.
   auto node_kind = n->kind();
   if (node_kind == ::c10::onnx::Loop || node_kind == ::c10::onnx::If) {
-    if (n->blocks().size() == 0) {
+    if (n->blocks().empty()) {
       return false;
     }
   }
@@ -317,7 +317,14 @@ Node* CloneNodeToGraph(
           }
           case ::c10::prim::PackPadded: {
             auto input = n_graph->addInput();
-            input->copyMetadata(v_n->input(0));
+            if (v == v_n->output(0)) {
+              // Only the first output requires this workaround.
+              // In `peephole` pass, user nodes are modified to consume the
+              // input instead.
+              input->copyMetadata(v_n->input(0));
+            } else {
+              input->copyMetadata(v);
+            }
             return input;
           }
           default: {
@@ -406,7 +413,7 @@ void ConvertGraphToONNXProto(
 }
 
 c10::optional<at::Tensor> ComputeConstantFolding(Node* n, int opset_version) {
-  if (n->inputs().size() == 0) {
+  if (n->inputs().empty()) {
     return c10::nullopt;
   }
   std::vector<at::Tensor> inputTensorValues;
@@ -428,7 +435,7 @@ c10::optional<at::Tensor> ComputeConstantFolding(Node* n, int opset_version) {
         n, inputTensorValues, opset_version);
   } catch (const std::exception& ex) {
     auto ex_str = std::string(ex.what());
-    ex_str = ex_str.substr(0, ex_str.find("\n"));
+    ex_str = ex_str.substr(0, ex_str.find('\n'));
     TORCH_WARN("Constant folding in symbolic shape inference fails: ", ex_str);
     return c10::nullopt;
   }
@@ -481,7 +488,8 @@ c10::optional<::c10::SymbolicShape> ComputeShapeFromReshape(
   uint64_t shape_ratio = 1;
   std::unordered_map<int64_t, int64_t> sym_map;
   for (const c10::ShapeSymbol& input_shape : input_shape_vector) {
-    if (input_shape.is_static()) {
+    // input_shape.static_size() could be zero when torch.tensor([]) is used.
+    if (input_shape.is_static() && input_shape.static_size() != 0) {
       if (shape_ratio >=
           std::numeric_limits<uint64_t>::max() / input_shape.static_size()) {
         TORCH_WARN(
@@ -951,7 +959,7 @@ void ProcessReshapeNode(Node* n, int opset_version) {
     auto static_shape_value =
         ConstantValueMap::GetValueInto1DInt64Vector(shape_name);
     auto symbolic_input_shape = ConstantValueMap::GetShape(input_name);
-    if (symbolic_input_shape && static_shape_value.size() > 0) {
+    if (symbolic_input_shape && !static_shape_value.empty()) {
       auto final_shape = ComputeShapeFromReshape(
           n,
           symbolic_input_shape.value(),
@@ -1813,6 +1821,40 @@ void FetchBlockInputMetadataFromParent(Block* b) {
   }
 }
 
+void RemoveProcessedInputs(const Node* n) {
+  // After processing a node for shape inference, remove intermediate tensors
+  // that are stored in ConstantValueMap to reduce memory usage.
+  // This will only remove tensors that are no longer needed by any other node.
+
+  // Returns whether a node was already processed for shape inference.
+  const auto isNodeProcessed = [](const Node* node) {
+    const auto& outputs = node->outputs();
+    return std::any_of(outputs.begin(), outputs.end(), [](const Value* output) {
+      // Assumes shape inference can at least determine the rank of the outputs.
+      // If this assumption is wrong, some intermediate tensors will only be
+      // deleted once shape inference is completed for the entire graph.
+      return ConstantValueMap::HasRank(output->debugName());
+    });
+  };
+
+  // An input value is no longer needed if all of its consumer nodes
+  // have already been processed.
+  const auto isValueNoLongerNeeded = [isNodeProcessed](const Value* input) {
+    const auto& uses = input->uses();
+    return std::all_of(
+        uses.begin(), uses.end(), [isNodeProcessed](const Use& use) {
+          return isNodeProcessed(use.user);
+        });
+  };
+
+  for (const auto* input : n->inputs()) {
+    if (ConstantValueMap::HasValue(input->debugName()) &&
+        isValueNoLongerNeeded(input)) {
+      ConstantValueMap::EraseValue(input->debugName());
+    }
+  }
+}
+
 void ONNXShapeTypeInference(
     Block* b,
     const ParamMap& params_dict,
@@ -1842,6 +1884,7 @@ void ONNXShapeTypeInference(
       ONNXShapeTypeInference(subblock, params_dict, opset_version);
     }
     ONNXShapeTypeInference(n, params_dict, opset_version);
+    RemoveProcessedInputs(n);
   }
 }
 
@@ -2054,10 +2097,8 @@ void ONNXShapeTypeInference(
         const char shape_err[] = "ShapeInferenceError";
         // NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
         const char type_err[] = "TypeInferenceError";
-        // NOLINTNEXTLINE(modernize-use-nullptr)
-        if ((strstr(ex.what(), shape_err) == NULL) &&
-            // NOLINTNEXTLINE(modernize-use-nullptr)
-            (strstr(ex.what(), type_err) == NULL)) {
+        if ((strstr(ex.what(), shape_err) == nullptr) &&
+            (strstr(ex.what(), type_err) == nullptr)) {
           throw;
         }
       }
@@ -2140,7 +2181,7 @@ void ONNXSetDynamicInputShape(
   std::map<std::string, ::c10::ShapeSymbol> name_to_sym;
 
   for (const auto i : c10::irange(input_names.size())) {
-    auto input_name = input_names[i];
+    const auto& input_name = input_names[i];
     if (dynamic_axes.find(input_name) != dynamic_axes.end()) {
       auto axes_names = dynamic_axes.find(input_name)->second;
       TORCH_INTERNAL_ASSERT(i < graph->inputs().size());
@@ -2205,7 +2246,8 @@ size_t ONNXAssignOutputShape(
     size_t outputs_index,
     PyObject* output_obj,
     bool onnx_shape_inference,
-    bool is_script) {
+    bool is_script,
+    int opset_version) {
   auto index_check = [&]() {
     TORCH_INTERNAL_ASSERT(
         outputs_index <= graph->outputs().size(),
@@ -2227,7 +2269,8 @@ size_t ONNXAssignOutputShape(
           outputs_index,
           PyTuple_GET_ITEM(output_obj, i),
           onnx_shape_inference,
-          is_script);
+          is_script,
+          opset_version);
     }
   } else if (PyList_Check(output_obj)) {
     const auto list_len = PyList_GET_SIZE(output_obj);
@@ -2275,7 +2318,8 @@ size_t ONNXAssignOutputShape(
             outputs_index,
             PyList_GET_ITEM(output_obj, i),
             onnx_shape_inference,
-            is_script);
+            is_script,
+            opset_version);
       }
     }
   } else if (PyDict_Check(output_obj)) {
@@ -2291,7 +2335,8 @@ size_t ONNXAssignOutputShape(
           outputs_index,
           PyList_GET_ITEM(unrolled_dict.ptr(), i),
           onnx_shape_inference,
-          is_script);
+          is_script,
+          opset_version);
     }
   } else if (THPUtils_checkString(output_obj)) {
     // Ignore string, since they are not supported as output in ONNX.
@@ -2313,7 +2358,12 @@ size_t ONNXAssignOutputShape(
     // contain None objects. Ideally we'd remove this difference.
     if (is_script && outputs_index < graph->outputs().size()) {
       if (graph->outputs().at(outputs_index)->node()->mustBeNone()) {
-        graph->eraseOutput(outputs_index);
+        if (opset_version >= 15) {
+          ReplaceGraphOutputNoneWithOptional(graph, outputs_index);
+          outputs_index++;
+        } else {
+          graph->eraseOutput(outputs_index);
+        }
       } else {
         outputs_index++;
       }
@@ -2331,18 +2381,47 @@ size_t ONNXAssignOutputShape(
   return outputs_index;
 }
 
+Node* ONNXOptionalNodeForNone(std::shared_ptr<Graph>& graph) {
+  TypePtr elem_type = TensorType::get()->withScalarType(at::ScalarType::Float);
+  Node* opt_node = graph->create(::c10::onnx::Optional, 1);
+  opt_node->ty_(Symbol::attr("type"), elem_type);
+  opt_node->output()->setType(OptionalType::create(elem_type));
+  return opt_node;
+}
+
+void ReplaceGraphOutputNoneWithOptional(
+    std::shared_ptr<Graph>& graph,
+    size_t outputs_index) {
+  Node* opt_node = ONNXOptionalNodeForNone(graph);
+  opt_node->insertBefore(graph->return_node());
+  Value* graph_output = graph->outputs().at(outputs_index);
+  // replace only the last value as Optional type only affects
+  // the value right before output
+  graph_output->replaceAllUsesAfterNodeWith(opt_node, opt_node->output());
+  if (!graph_output->type()->cast<NoneType>()) {
+    opt_node->addInput(graph_output);
+    opt_node->copyMetadata(graph_output->node());
+  }
+}
+
 void ONNXAssignOutputShape(
     std::shared_ptr<Graph>& graph,
     at::ArrayRef<at::Tensor> outputs,
     const python::IODescriptor& desc,
     bool onnx_shape_inference,
-    bool is_script) {
+    bool is_script,
+    int opset_version) {
   size_t outputs_index = 0;
   PyObject* py_obj = unflatten(outputs, desc);
   TORCH_INTERNAL_ASSERT(PyTuple_Check(py_obj));
 
   outputs_index = ONNXAssignOutputShape(
-      graph, outputs_index, py_obj, onnx_shape_inference, is_script);
+      graph,
+      outputs_index,
+      py_obj,
+      onnx_shape_inference,
+      is_script,
+      opset_version);
 
   TORCH_INTERNAL_ASSERT(
       outputs_index == graph->outputs().size(),

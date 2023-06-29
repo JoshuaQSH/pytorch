@@ -2,14 +2,11 @@
 #define C10_UTIL_EXCEPTION_H_
 
 #include <c10/macros/Macros.h>
-#include <c10/util/Deprecated.h>
 #include <c10/util/StringUtil.h>
 #include <c10/util/variant.h>
 
 #include <cstddef>
 #include <exception>
-#include <ostream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -123,7 +120,7 @@ class C10_API Warning {
   Warning(
       warning_variant_t type,
       const SourceLocation& source_location,
-      const std::string& msg,
+      std::string msg,
       bool verbatim);
 
   Warning(

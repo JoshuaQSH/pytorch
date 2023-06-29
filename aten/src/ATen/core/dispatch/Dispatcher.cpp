@@ -1,7 +1,8 @@
 #include <ATen/core/dispatch/Dispatcher.h>
+#include <chrono>
 #include <list>
 #include <sstream>
-#include <chrono>
+#include <utility>
 
 namespace c10 {
 
@@ -206,7 +207,7 @@ RegistrationHandleRAII Dispatcher::registerDef(FunctionSchema schema, std::strin
   TORCH_CHECK(op.operatorDef_->def_count == 0, "Tried to register an operator (", schema, ") with the same name and overload name multiple times.",
                                                     " Each overload's schema should only be registered with a single call to def().",
                                                     " Duplicate registration: ", debug, ". Original registration: ", op.operatorDef_->op.debug());
-  op.operatorDef_->op.registerSchema(std::move(schema), std::move(debug), tags);
+  op.operatorDef_->op.registerSchema(std::move(schema), std::move(debug), std::move(tags));
   listeners_->callOnOperatorRegistered(op);
 
   // NB: do not increment the counts until AFTER error checking
@@ -259,7 +260,6 @@ RegistrationHandleRAII Dispatcher::registerImpl(
     *this,
     dispatch_key,
     std::move(kernel),
-    // NOLINTNEXTLINE(performance-move-const-arg)
     std::move(cpp_signature),
     std::move(inferred_function_schema),
     std::move(debug)
@@ -329,7 +329,7 @@ RegistrationHandleRAII Dispatcher::registerFallback(DispatchKey dispatchKey, Ker
     backendFallbackKernels_[idx].debug, ", new registration ", debug
   );
   // NB: inferred function schema is always nullptr for fallbacks, as fallbacks
-  // cannot be unobxed
+  // cannot be unboxed
   backendFallbackKernels_[idx] = impl::AnnotatedKernel(std::move(kernel), nullptr, std::move(debug));
 
   for (auto& op : operators_) {
@@ -403,7 +403,7 @@ std::vector<OperatorName> Dispatcher::getRegistrationsForDispatchKey(c10::option
 int64_t Dispatcher::sequenceNumberForRunningRecordFunction(DispatchKey dispatchKey) {
   int64_t seq_num = -1;
   // Setting sequence number in the Autograd case to associate
-  // the forward range with the coresponding Autograd's node
+  // the forward range with the corresponding Autograd's node
   if (isIncludedInAlias(dispatchKey, DispatchKey::Autograd) && at::GradMode::is_enabled()) {
     seq_num = at::sequence_number::peek();
   }
@@ -416,7 +416,7 @@ void Dispatcher::runRecordFunction(at::RecordFunction& guard, at::RecordFunction
 
 void Dispatcher::runRecordFunction(at::RecordFunction& guard, at::RecordFunction::schema_ref_t schema_ref, DispatchKey dispatchKey) {
   // Setting sequence number in the Autograd case to associate
-  // the forward range with the coresponding Autograd's node
+  // the forward range with the corresponding Autograd's node
   guard.before(schema_ref, sequenceNumberForRunningRecordFunction(dispatchKey));
 }
 

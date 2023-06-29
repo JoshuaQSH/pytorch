@@ -48,6 +48,38 @@ def _type(self, dtype=None, non_blocking=False, **kwargs):
     return dtype(self.size()).copy_(self, non_blocking)
 
 
+def _hpu(self, device=None, non_blocking=False, **kwargs):
+    """Returns a copy of this object in HPU memory.
+
+    If this object is already in HPU memory and on the correct device, then
+    no copy is performed and the original object is returned.
+
+    Args:
+        device (int): The destination HPU id. Defaults to the current device.
+        non_blocking (bool): If ``True`` and the source is in pinned memory,
+            the copy will be asynchronous with respect to the host. Otherwise,
+            the argument has no effect.
+        **kwargs: For compatibility, may contain the key ``async`` in place of
+            the ``non_blocking`` argument.
+    """
+    non_blocking = _get_async_or_non_blocking("hpu", non_blocking, kwargs)
+    hpu = getattr(torch, "hpu", None)
+    assert hpu is not None, "HPU device module is not loaded"
+    if self.is_hpu:
+        if device is None:
+            device = hpu.current_device()
+        if self.get_device() == device:
+            return self
+    else:
+        if device is None:
+            device = -1
+    with hpu.device(device):
+        assert not self.is_sparse, "sparse storage is not supported for HPU tensors"
+        untyped_storage = torch.UntypedStorage(self.size(), device=torch.device("hpu"))
+        untyped_storage.copy_(self, non_blocking)
+        return untyped_storage
+
+
 def _cuda(self, device=None, non_blocking=False, **kwargs):
     """Returns a copy of this object in CUDA memory.
 
@@ -180,6 +212,7 @@ def _rebuild_tensor_v2(
 
 _sparse_tensors_to_validate: List["torch.Tensor"] = []
 
+
 # In _legacy_load() in serialization.py we unpickle storages after the sparse
 # tensors have been already unpickled. Those storages contain data necessary for
 # validating sparse tensors: indices and values. That's why sparse tensors are
@@ -236,8 +269,15 @@ def _rebuild_sparse_tensor(layout, data):
         data (tuple): The tensor's sparse storage representation.
     """
     if layout == torch.sparse_coo:
-        indices, values, size = data
-        result = torch._sparse_coo_tensor_unsafe(indices, values, size)
+        if len(data) == 3:
+            # For BC:
+            indices, values, size = data
+            is_coalesced = None
+        else:
+            indices, values, size, is_coalesced = data
+        result = torch.sparse_coo_tensor(indices, values, size, check_invariants=False)
+        if is_coalesced is not None:
+            result._coalesced_(is_coalesced)
         _sparse_tensors_to_validate.append(result)
         return result
 
@@ -248,8 +288,13 @@ def _rebuild_sparse_tensor(layout, data):
         torch.sparse_bsc,
     }:
         compressed_indices, plain_indices, values, size = data
-        result = torch._sparse_compressed_tensor_unsafe(
-            compressed_indices, plain_indices, values, size, layout=layout
+        result = torch.sparse_compressed_tensor(
+            compressed_indices,
+            plain_indices,
+            values,
+            size,
+            layout=layout,
+            check_invariants=False,
         )
         _sparse_tensors_to_validate.append(result)
         return result
@@ -352,8 +397,6 @@ def _rebuild_parameter(data, requires_grad, backward_hooks):
     return param
 
 
-# TODO(kshitij12345): Support serializing nn.Parameter with Python Attributes.
-# NOTE: We are just defining it here now for future use.
 def _rebuild_parameter_with_state(data, requires_grad, backward_hooks, state):
     param = torch.nn.Parameter(data, requires_grad)
     # NB: This line exists only for backwards compatibility; the
@@ -371,6 +414,8 @@ def _get_obj_state(obj):
     # This loosely mimicks the function on the object class but since Tensor do not inherit
     # from it, we cannot call that function directly
     # https://github.com/python/cpython/blob/c83919bd635f4433f1c6ae8504996a9fe3c215e5/Objects/typeobject.c#L4891
+    # Note that starting with Python 3.11, this `__getstate__` is always defined and thus
+    # the else branch will never be taken.
     getstate_fn = getattr(obj, "__getstate__", None)
     if getstate_fn:
         state = getstate_fn()
@@ -401,8 +446,11 @@ def _set_obj_state(obj, state):
         dict_state = state
         slots_state = None
 
-    for k, v in dict_state.items():
-        setattr(obj, k, v)
+    # Starting with Python 3.11, the __dict__ attribute is lazily created
+    # and is serialized as None when not needed.
+    if dict_state:
+        for k, v in dict_state.items():
+            setattr(obj, k, v)
 
     if slots_state:
         for k, v in slots_state.items():
@@ -583,6 +631,19 @@ def annotate(ret, **kwargs):
     return dec
 
 
+def render_call(fn, args, kwargs):
+    str_fn = torch.overrides.resolve_name(fn)
+    if str_fn is None:
+        str_fn = str(fn)
+
+    str_args: List[str] = []
+    with torch._tensor_str.printoptions(threshold=0, edgeitems=0):
+        str_args.extend(repr(a) for a in args)
+        str_args.extend(f"{k}={repr(v)}" for k, v in kwargs.items())
+        r = f"{str_fn}({', '.join(str_args)})"
+    return r
+
+
 # NOTE [ Python Traceback Reference Cycle Problem ]
 #
 # When using sys.exc_info(), it is important to **not** store the exc_info[2],
@@ -599,7 +660,7 @@ class KeyErrorMessage(str):
         return self
 
 
-class ExceptionWrapper(object):
+class ExceptionWrapper:
     r"""Wraps an exception plus traceback to communicate across threads"""
 
     def __init__(self, exc_info=None, where="in background"):
@@ -641,6 +702,10 @@ def _get_available_device_type():
         return "cuda"
     if hasattr(torch, "xpu") and torch.xpu.is_available():  # type: ignore[attr-defined]
         return "xpu"
+    custom_backend_name = torch._C._get_privateuse1_backend_name()
+    custom_device_mod = getattr(torch, custom_backend_name, None)
+    if custom_device_mod and custom_device_mod.is_available():
+        return custom_backend_name
     # add more available device types here
     return None
 
@@ -651,6 +716,8 @@ def _get_device_attr(get_member):
         return get_member(torch.cuda)
     if device_type and device_type.lower() == "xpu":
         return get_member(torch.xpu)  # type: ignore[attr-defined]
+    if device_type == torch._C._get_privateuse1_backend_name():
+        return get_member(getattr(torch, device_type))
     # add more available device types here
     return None
 
@@ -772,3 +839,8 @@ def classproperty(func):
     if not isinstance(func, (classmethod, staticmethod)):
         func = classmethod(func)
     return _ClassPropertyDescriptor(func)
+
+
+# Whether we are compiling with torch.compile or not
+def is_compiling():
+    return False

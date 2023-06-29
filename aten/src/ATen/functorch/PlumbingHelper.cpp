@@ -7,6 +7,7 @@
 #include <ATen/functorch/TensorWrapper.h>
 #include <ATen/functorch/DynamicLayer.h>
 #include <ATen/functorch/BatchedTensorImpl.h>
+#include <ATen/functorch/PlumbingHelper.h>
 
 namespace at { namespace functorch {
 
@@ -32,13 +33,14 @@ Tensor makeBatched(const Tensor& tensor, optional<int64_t> bdim, int64_t level) 
 
 std::vector<Tensor> makeBatchedVector(const std::vector<Tensor>& tensors, optional<int64_t> bdim, int64_t level) {
   std::vector<Tensor> res;
+  res.reserve(tensors.size());
   for (const auto & tensor : tensors) {
     res.emplace_back(makeBatched(tensor, bdim, level));
   }
   return res;
 }
 
-std::tuple<Tensor, optional<int64_t>> unwrapTensorAtLevel(const Tensor& tensor, int64_t level) {
+std::tuple<Tensor, c10::optional<int64_t>> unwrapTensorAtLevel(const Tensor& tensor, int64_t level) {
   auto* batched = maybeGetBatchedImpl(tensor);
   if (!batched) {
     return std::make_tuple(tensor, nullopt);
@@ -70,7 +72,7 @@ bool isBatchedAtLevel(ITensorListRef tensors, int64_t level) {
   return false;
 }
 
-bool isBatchedAtLevel(const c10::List<c10::optional<Tensor>> maybe_tensors, int64_t level) {
+bool isBatchedAtLevel(const c10::List<c10::optional<Tensor>>& maybe_tensors, int64_t level) {
   for (const auto idx : c10::irange(0, maybe_tensors.size())) {
     const auto& maybe_tensor = maybe_tensors.get(idx);
     if (isBatchedAtLevel(maybe_tensor, level)) {

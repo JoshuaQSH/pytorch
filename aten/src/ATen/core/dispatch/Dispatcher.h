@@ -13,6 +13,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <type_traits>
+#include <c10/core/SafePyObject.h>
 
 #include <ATen/core/grad_mode.h>
 #include <ATen/core/enum_tag.h>
@@ -336,13 +337,14 @@ private:
  * to lookup a kernel for a certain set of arguments.
  */
 class TORCH_API OperatorHandle {
-  template <typename T> friend class std::hash;
+  template <typename T> friend struct std::hash;
 
 public:
   OperatorHandle(OperatorHandle&&) noexcept = default;
   OperatorHandle& operator=(OperatorHandle&&) noexcept = default;
   OperatorHandle(const OperatorHandle&) = default;
   OperatorHandle& operator=(const OperatorHandle&) = default;
+  // NOLINTNEXTLINE(performance-trivially-destructible)
   ~OperatorHandle();
 
   const OperatorName& operator_name() const {
@@ -387,6 +389,10 @@ public:
 
   c10::ArrayRef<at::Tag> getTags() const {
     return operatorDef_->op.getTags();
+  }
+
+  void setReportErrorCallback_(std::unique_ptr<c10::SafePyObject> callback) {
+    operatorDef_->op.setReportErrorCallback_(std::move(callback));
   }
 
   bool hasTag(const at::Tag& tag) const {

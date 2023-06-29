@@ -36,11 +36,12 @@ from .planner import (
     WriteItemType,
 )
 
+from .utils import _create_file_view
+
 from torch.distributed._shard._utils import narrow_tensor_by_index
 
 __all__ = [
     "FileSystemWriter",
-    "SlicedBufferedReader",
     "FileSystemReader",
 ]
 
@@ -84,6 +85,7 @@ class _TensorLoader(ABC):
     def add(self, size, obj):
         pass
 
+    @abstractmethod
     def start_loading(self):
         pass
 
@@ -189,11 +191,9 @@ class _OverlappingCpuLoader(_TensorLoader):
         while not self._done:
             drained = self._drain()
             self._refill()
-            for obj in drained:
-                yield obj
+            yield from drained
 
-        for val in self._finish():
-            yield val
+        yield from self._finish()
 
 
 def _item_size(item: WriteItem) -> int:
@@ -321,7 +321,7 @@ class FileSystemWriter(StorageWriter):
     def __init__(
         self,
         path: Union[str, os.PathLike],
-        single_file_per_rank: bool = False,
+        single_file_per_rank: bool = True,
         sync_files: bool = True,
         thread_count: int = 1,
         per_thread_copy_ahead: int = 10_000_000,
@@ -330,7 +330,7 @@ class FileSystemWriter(StorageWriter):
         Initialize the writer pointing to `path`
 
         Args:
-            path: diretory where the checkpoint will be writen to.
+            path: directory where the checkpoint will be written to.
             single_file_per_rank: Produce one file per rank instead of one file per tensor/blob. Default to True.
             sync_files : force files to be synced to permanent storage. Default to True.
             thread_count: Number of IO threads to use to write. Default to 1.
@@ -345,18 +345,16 @@ class FileSystemWriter(StorageWriter):
         self.thread_count = thread_count
         self.per_thread_copy_ahead = per_thread_copy_ahead
 
-    def init(self, is_coordinator: bool) -> None:
+    def set_up_storage_writer(self, is_coordinator: bool) -> None:
         pass
 
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
-        # There's no storage input in the local plan
+        self.path.mkdir(parents=True, exist_ok=True)
         return plan
 
     def prepare_global_plan(
         self, global_plan: List[SavePlan]
     ) -> List[SavePlan]:
-        self.path.mkdir(parents=True, exist_ok=True)
-
         new_plans = [
             dataclasses.replace(plan, storage_data=_StoragePrefix(f"__{i}_"))
             for i, plan in enumerate(global_plan)
@@ -442,26 +440,6 @@ class FileSystemWriter(StorageWriter):
         (self.path / ".metadata.tmp").rename(self.path / ".metadata")
 
 
-class SlicedBufferedReader(io.BufferedReader):
-    # TODO override read to handle (-1) correctly
-    def __init__(self, base_stream: io.RawIOBase, offset: int, len: int):
-        super().__init__(base_stream)
-        self.offset = offset
-        self.len = len
-        self.seek(0)
-
-    def seek(self, __offset: int, __whence: int = os.SEEK_SET) -> int:
-        if __whence == os.SEEK_SET:
-            __offset = self.offset + __offset
-        elif __whence == os.SEEK_END:
-            __whence = os.SEEK_SET
-            __offset = (self.offset + self.len) - __offset
-        return super().seek(__offset, __whence)
-
-    def tell(self) -> int:
-        return super().tell() - self.offset
-
-
 class FileSystemReader(StorageReader):
     def __init__(self, path: Union[str, os.PathLike]) -> None:
         super().__init__()
@@ -469,9 +447,7 @@ class FileSystemReader(StorageReader):
         self.storage_data: Dict[MetadataIndex, _StorageInfo] = dict()
 
     def _slice_file(self, file, sinfo: _StorageInfo):
-        return SlicedBufferedReader(
-            io.FileIO(file.fileno(), closefd=False), sinfo.offset, sinfo.length
-        )
+        return _create_file_view(file, sinfo.offset, sinfo.length)
 
     def read_data(self, plan: LoadPlan, planner: LoadPlanner) -> Future[None]:
         # group requests by file
@@ -510,12 +486,12 @@ class FileSystemReader(StorageReader):
         fut.set_result(None)
         return fut
 
-    # Implementating the abstract function in StorageReader
+    # Implementing the abstract function in StorageReader
     def read_metadata(self) -> Metadata:
         with (self.path / ".metadata").open("rb") as metadata_file:
             return pickle.load(metadata_file)
 
-    def init(self, metadata: Metadata, is_coordinator: bool) -> None:
+    def set_up_storage_reader(self, metadata: Metadata, is_coordinator: bool) -> None:
         self.storage_data = metadata.storage_data
         assert self.storage_data is not None
 

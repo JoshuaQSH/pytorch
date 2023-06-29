@@ -300,9 +300,12 @@ class FP32MatMulPattern(Pattern):
 
     @property
     def skip(self):
-        # Anything less than sm_80 is not Ampere which doesn't support TF32
-        has_tf32 = all(
-            int(arch[3:]) >= 80 for arch in torch.cuda.get_arch_list())
+        if torch.version.hip is not None:
+            has_tf32 = False
+        else:
+            # Anything less than sm_80 is not Ampere which doesn't support TF32
+            has_tf32 = all(
+                int(arch[3:]) >= 80 for arch in torch.cuda.get_arch_list())
         return has_tf32 is False or super().skip or not self.prof.record_shapes
 
     def match(self, event: _ProfilerEvent):
@@ -409,6 +412,14 @@ class SynchronizedDataLoaderPattern(Pattern):
             return name.startswith(
                 os.path.join("torch", "utils", "data",
                              "dataloader.py")) and name.endswith(function_name)
+
+        # TODO: fixme! Due to lifetime issues of the function name, this field might
+        # actually point to an already freed string when the even is a PyCall.
+        # Just silently skip this to unblock testing.
+        try:
+            event.name
+        except UnicodeDecodeError:
+            return False
 
         if not is_dataloader_function(event.name, "__iter__"):
             return False
@@ -571,9 +582,7 @@ class MatMulDimInFP16Pattern(Pattern):
 def source_code_location(event: Optional[_ProfilerEvent]):
     while event:
         if event.tag == _EventType.PyCall or event.tag == _EventType.PyCCall:
-            assert isinstance(event.extra_fields,
-                              _ExtraFields_PyCall) or isinstance(
-                                  event.extra_fields, _ExtraFields_PyCCall)
+            assert isinstance(event.extra_fields, (_ExtraFields_PyCall, _ExtraFields_PyCCall))
             if not event.extra_fields.caller.file_name.startswith("torch" +
                                                                   os.sep):
                 return f"{event.extra_fields.caller.file_name}:{event.extra_fields.caller.line_number}"

@@ -169,11 +169,33 @@ If full precision reductions are needed, users can disable reduced precision red
 
   torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
 
-To toggle the reduced precision reduction flags in C++, you can do
+To toggle the reduced precision reduction flags in C++, one can do
 
 .. code:: C++
 
   at::globalContext().setAllowFP16ReductionCuBLAS(false);
+
+.. _bf16reducedprecision:
+
+Reduced Precision Reduction in BF16 GEMMs
+-----------------------------------------
+
+A similar flag (as above) exists for BFloat16 GEMMs.
+Note that this switch is set to `True` by default for BF16, if you observe
+numerical instability in your workload, you may wish to set it to `False`.
+
+If reduced precision reductions are not desired, users can disable reduced
+precision reductions in bf16 GEMMs with:
+
+.. code:: python
+
+  torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
+To toggle the reduced precision reduction flags in C++, one can do
+
+.. code:: C++
+
+  at::globalContext().setAllowBF16ReductionCuBLAS(true);
 
 Asynchronous execution
 ----------------------
@@ -453,7 +475,7 @@ traces all the memory operations.
       return ptr;
    }
 
-   void my_free(void* ptr, ssize_t size, cudaStream_t stream) {
+   void my_free(void* ptr, ssize_t size, int device, cudaStream_t stream) {
       std::cout<<"free "<<ptr<< " "<<stream<<std::endl;
       cudaFree(ptr);
    }
@@ -489,6 +511,19 @@ of the alloc/free functions that match the signatures specified above.
    # This will error since the current allocator was already instantiated
    torch.cuda.memory.change_current_allocator(new_alloc)
 
+.. cublas-workspaces:
+
+cuBLAS workspaces
+-----------------
+
+For each combination of cuBLAS handle and CUDA stream, a cuBLAS workspace will be allocated
+if that handle and stream combination executes a cuBLAS kernel that requires a workspace.
+In order to avoid repeatedly allocating workspaces, these workspaces are not deallocated unless
+``torch._C._cuda_clearCublasWorkspaces()`` is called. The workspace size per allocation can be
+specified via the environment variable ``CUBLAS_WORKSPACE_CONFIG`` with the format ``:[SIZE]:[COUNT]``.
+As an example, the default workspace size per allocation is ``CUBLAS_WORKSPACE_CONFIG=:4096:2:16:8``
+which specifies a total size of ``2 * 4096 + 8 * 16 KiB``. To force cuBLAS to avoid using workspaces,
+set ``CUBLAS_WORKSPACE_CONFIG=:0:0``.
 
 .. _cufft-plan-cache:
 
